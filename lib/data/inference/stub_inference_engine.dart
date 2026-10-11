@@ -1,18 +1,14 @@
-import 'dart:async';
-
 import '../../domain/engines/inference_engine.dart';
 import '../../domain/models/model_info.dart';
+import 'inference_diagnostics.dart';
 
 /// Honest offline backend when no on-device Gemma runtime/model is configured.
 class StubInferenceEngine implements InferenceEngine {
   bool _ready = false;
-  final _stateController = StreamController<ModelRuntimeState>.broadcast();
+  final InferenceDiagnostics _diagnostics = InferenceDiagnostics();
 
-  ModelRuntimeState _state = const ModelRuntimeState(
-    phase: ModelPhase.notInstalled,
-    message: 'Using rule-based fallback. Install a compatible on-device model for full chat.',
-    usingFallback: true,
-  );
+  @override
+  InferenceDiagnostics get diagnostics => _diagnostics;
 
   @override
   String get name => 'Stub (no local model loaded)';
@@ -21,45 +17,42 @@ class StubInferenceEngine implements InferenceEngine {
   bool get isReady => _ready;
 
   @override
-  String? get statusMessage => _state.message;
+  String? get statusMessage =>
+      _ready
+          ? 'Using rule-based fallback. Install a compatible on-device model for full chat.'
+          : 'Not initialized';
 
   @override
   bool get isUsingRealModel => false;
 
   @override
-  ModelRuntimeState get modelState => _state;
+  ModelRuntimeState get modelState => const ModelRuntimeState(
+        phase: ModelPhase.notInstalled,
+        message: 'Stub engine — no on-device weights.',
+        usingFallback: true,
+      );
 
   @override
-  Stream<ModelRuntimeState> get modelStateStream => _stateController.stream;
+  Stream<ModelRuntimeState> get modelStateStream =>
+      Stream<ModelRuntimeState>.value(modelState);
+
+  @override
+  Future<void> downloadAndInstallModel({String? huggingFaceToken}) async {
+    throw UnsupportedError('Stub engine cannot download models');
+  }
+
+  @override
+  Future<void> ensureModelLoaded() async {}
 
   @override
   Future<void> initialize() async {
     _ready = true;
-    _state = const ModelRuntimeState(
-      phase: ModelPhase.notInstalled,
-      message:
-          'Using rule-based fallback. Install a compatible on-device model for full chat.',
-      usingFallback: true,
-    );
-    if (!_stateController.isClosed) _stateController.add(_state);
+    _diagnostics.add('stub initialize');
   }
 
   @override
   Future<void> dispose() async {
     _ready = false;
-    if (!_stateController.isClosed) await _stateController.close();
-  }
-
-  @override
-  Future<void> downloadAndInstallModel({String? huggingFaceToken}) async {
-    throw UnsupportedError(
-      'Stub engine cannot download models. Use GemmaInferenceEngine.',
-    );
-  }
-
-  @override
-  Future<void> ensureModelLoaded() async {
-    // no-op for stub
   }
 
   @override
@@ -75,14 +68,15 @@ class StubInferenceEngine implements InferenceEngine {
     if (lower.isEmpty) {
       return 'Please type a message.';
     }
+    // remember-that must be checked before generic "remember" help text.
+    if (lower.startsWith('remember that ') || lower.startsWith('remember:')) {
+      return 'ACK_SAVE_MEMORY'; // orchestrator intercepts
+    }
     if (lower.contains('who are you') || lower.contains('what are you')) {
       return 'I am ProjectEVO, a personal assistant app on your Android device. '
           'I use stored memory and optional research to help you. '
           'I am software — not conscious or sentient. '
           'A full on-device language model is not loaded yet; this is the built-in fallback responder.';
-    }
-    if (lower.startsWith('remember that ') || lower.startsWith('remember:')) {
-      return 'ACK_SAVE_MEMORY'; // orchestrator intercepts
     }
     if (lower.contains('memory') || lower.contains('remember')) {
       return 'I can save facts you approve into local SQLite memory (not by training model weights). '
@@ -97,7 +91,7 @@ class StubInferenceEngine implements InferenceEngine {
     return 'Fallback reply (no Gemma weights loaded on device).\n\n'
         'You said: "$userMessage"\n\n'
         '${hasMemory ? "I included retrieved memory in context for this answer.\n\n" : ""}'
-        'Next steps: download Gemma 3 270M in Settings → Model, '
+        'Next steps: configure a small quantized model when available (see Settings → Model), '
         'or continue using Memory + Research modules. '
         'Simulated personality settings only affect tone scaffolding, not real emotions.';
   }

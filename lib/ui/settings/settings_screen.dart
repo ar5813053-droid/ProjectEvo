@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -177,6 +178,64 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 .read(personalityProvider.notifier)
                 .update(personality.copyWith(caution: v)),
           ),
+          const Divider(height: 32),
+          Text('Inference diagnostics', style: Theme.of(context).textTheme.titleMedium),
+          const Text(
+            'Safe logs for debugging empty replies. No HF tokens, full prompts, or memory contents.',
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(maxHeight: 220),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              border: Border.all(color: Theme.of(context).dividerColor),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SingleChildScrollView(
+              child: SelectableText(
+                inference.diagnostics.asText,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () async {
+                    await Clipboard.setData(
+                      ClipboardData(text: inference.diagnostics.asText),
+                    );
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Diagnostics copied')),
+                      );
+                    }
+                  },
+                  child: const Text('Copy diagnostics'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () {
+                    inference.diagnostics.clear();
+                    setState(() {});
+                  },
+                  child: const Text('Clear'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'After sending “hi”, open this section and copy the lines. '
+            'Share them if inference still fails. No PC required.',
+            style: TextStyle(fontSize: 12),
+          ),
           const Divider(),
           const ListTile(
             title: Text('Privacy'),
@@ -187,7 +246,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const ListTile(
             title: Text('About ProjectEVO'),
             subtitle: Text(
-              'Version 0.2.0 — on-device Gemma 3 270M when installed; otherwise labeled fallback. '
+              'Version 0.3.x — on-device Gemma 3 270M when installed; otherwise labeled fallback. '
               'Memory/research do not change model weights.',
             ),
           ),

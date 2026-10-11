@@ -7,23 +7,27 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../domain/engines/inference_engine.dart';
 import '../../domain/models/model_info.dart';
+import 'inference_diagnostics.dart';
 import 'response_sanitizer.dart';
 import 'stub_inference_engine.dart';
 
 /// On-device Gemma via Flutter Edge AI (MediaPipe .task).
 ///
-/// MediaPipe notes (flutter_edge_ai docs):
-/// - systemInstruction is prepended into the first user turn (not a real
-///   system role). We therefore avoid long systemInstruction text.
-/// - generateChatResponse() returns ModelResponse (TextResponse.token).
-/// - Official examples also stream via generateChatResponseAsync().
-/// - Message.isUser must be true or the model returns empty.
+/// Generation strategy (evidence-based from package examples):
+/// 1. **Primary:** [InferenceModel.createSession] + [InferenceModelSession.getResponse]
+///    — this is the path shown in the flutter_edge_ai_mediapipe / flutter_gemma_mediapipe
+///    README for .task models and returns a [String] directly.
+/// 2. **Secondary:** [InferenceChat] streaming via generateChatResponseAsync.
+///
+/// MediaPipe prepends systemInstruction into the first user turn; we avoid
+/// long systemInstruction text to prevent instruction-echo on 270M.
 class GemmaInferenceEngine implements InferenceEngine {
   static const _prefsInstalledKey = 'evo_model_installed_id';
   static const int _contextTokens = 1024;
 
   final StubInferenceEngine _fallback = StubInferenceEngine();
   final _stateController = StreamController<ModelRuntimeState>.broadcast();
+  final InferenceDiagnostics _diagnostics = InferenceDiagnostics();
 
   ModelRuntimeState _state = const ModelRuntimeState(
     phase: ModelPhase.notInstalled,
@@ -32,13 +36,14 @@ class GemmaInferenceEngine implements InferenceEngine {
   );
 
   InferenceModel? _model;
-  /// Long-lived chat session — create once after model load, reset on errors.
-  InferenceChat? _chat;
   bool _pluginReady = false;
   bool _lastGenerateWasGemma = false;
   bool _loading = false;
   bool _generating = false;
   final OnDeviceModelSpec _spec = ModelCatalog.defaultModel;
+
+  @override
+  InferenceDiagnostics get diagnostics => _diagnostics;
 
   @override
   String get name =>
@@ -69,6 +74,7 @@ class GemmaInferenceEngine implements InferenceEngine {
   }
 
   void _log(String msg) {
+    _diagnostics.add(msg);
     debugPrint('[ProjectEVO/Gemma] $msg');
   }
 
@@ -80,9 +86,10 @@ class GemmaInferenceEngine implements InferenceEngine {
         inferenceEngines: const [MediaPipeEngine()],
       );
       _pluginReady = true;
-      _log('FlutterEdgeAi initialized with MediaPipeEngine');
+      _log('init: MediaPipeEngine ok');
     } catch (e, st) {
-      _log('FlutterEdgeAi.initialize failed: $e\n$st');
+      _log('init FAIL: $e');
+      debugPrint('$st');
       _pluginReady = false;
       _emit(_state.copyWith(
         phase: ModelPhase.error,
@@ -95,6 +102,7 @@ class GemmaInferenceEngine implements InferenceEngine {
 
     final prefs = await SharedPreferences.getInstance();
     final installed = prefs.getString(_prefsInstalledKey) == _spec.id;
+    _log('init: prefsInstalled=$installed modelId=${_spec.id}');
     if (installed) {
       _emit(_state.copyWith(
         phase: ModelPhase.loading,
@@ -164,12 +172,11 @@ class GemmaInferenceEngine implements InferenceEngine {
       ));
 
       await installer.install();
+      _log('install: complete');
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_prefsInstalledKey, _spec.id);
 
-      // Drop any stale chat/model handles before reload.
-      await _closeChat();
       try {
         await _model?.close();
       } catch (_) {}
@@ -184,7 +191,8 @@ class GemmaInferenceEngine implements InferenceEngine {
 
       await ensureModelLoaded();
     } catch (e, st) {
-      _log('Model download/install failed: $e\n$st');
+      _log('install FAIL: $e');
+      debugPrint('$st');
       _emit(_state.copyWith(
         phase: ModelPhase.error,
         error: e.toString(),
@@ -221,9 +229,10 @@ class GemmaInferenceEngine implements InferenceEngine {
 
     try {
       _model = await FlutterEdgeAi.getActiveModel(maxTokens: _contextTokens);
-      _log('getActiveModel ok, maxTokens=$_contextTokens');
-      // Open a chat session now so first user message is not racing init.
-      await _ensureChat();
+      _log(
+        'load: getActiveModel ok type=${_model.runtimeType} '
+        'contextTokens=$_contextTokens',
+      );
       _emit(_state.copyWith(
         phase: ModelPhase.ready,
         message: 'Gemma 3 270M ready (on-device).',
@@ -231,7 +240,8 @@ class GemmaInferenceEngine implements InferenceEngine {
         error: null,
       ));
     } catch (e, st) {
-      _log('getActiveModel failed: $e\n$st');
+      _log('load FAIL: $e');
+      debugPrint('$st');
       _model = null;
       _emit(_state.copyWith(
         phase: ModelPhase.error,
@@ -243,39 +253,6 @@ class GemmaInferenceEngine implements InferenceEngine {
     } finally {
       _loading = false;
     }
-  }
-
-  Future<void> _ensureChat() async {
-    if (_chat != null) return;
-    if (_model == null) {
-      throw StateError('Model not loaded');
-    }
-    // Explicit modelType so MediaPipe applies Gemma IT chat templates.
-    _chat = await _model!.createChat(
-      modelType: ModelType.gemmaIt,
-      temperature: 0.8,
-      topK: 40,
-      topP: 0.95,
-      // Context-window sibling; MediaPipe may ignore maxOutputTokens.
-      maxOutputTokens: 256,
-    );
-    _log('createChat ok (modelType=gemmaIt)');
-  }
-
-  Future<void> _closeChat() async {
-    final c = _chat;
-    _chat = null;
-    if (c == null) return;
-    try {
-      await c.close();
-    } catch (e) {
-      _log('chat.close error (ignored): $e');
-    }
-  }
-
-  Future<void> _recreateChat() async {
-    await _closeChat();
-    await _ensureChat();
   }
 
   @override
@@ -290,6 +267,7 @@ class GemmaInferenceEngine implements InferenceEngine {
 
     if (_model == null) {
       _lastGenerateWasGemma = false;
+      _log('generate: no model handle — stub');
       final stub = await _fallback.generate(
         systemPrompt: systemPrompt,
         userMessage: userMessage,
@@ -299,78 +277,48 @@ class GemmaInferenceEngine implements InferenceEngine {
     }
 
     _generating = true;
+    final userPayload = _buildUserPayload(systemPrompt, userMessage);
+    _log(
+      'generate start userChars=${userMessage.trim().length} '
+      'payloadChars=${userPayload.length} model=${_model.runtimeType}',
+    );
+
     try {
-      await _ensureChat();
-      final chat = _chat!;
-      final userPayload = _buildUserPayload(systemPrompt, userMessage);
-      _log(
-        'generate start userLen=${userMessage.length} '
-        'payloadLen=${userPayload.length}',
-      );
-
-      await chat.addQueryChunk(
-        Message.text(text: userPayload, isUser: true),
-      );
-
-      // Prefer streaming accumulation — official examples use this path and
-      // some MediaPipe builds return fuller text via the async stream.
-      var raw = await _collectStreamedResponse(chat);
-      _log('stream path chars=${raw.length}');
-
-      // Fallback: sync generateChatResponse if stream was empty.
-      if (raw.trim().isEmpty) {
-        _log('stream empty — trying generateChatResponse()');
-        final response = await chat.generateChatResponse();
-        raw = _extractText(response);
-        _log(
-          'sync path type=${response.runtimeType} chars=${raw.length}',
-        );
+      // --- Path A: createSession + getResponse (official MediaPipe example) ---
+      final sessionResult = await _generateViaSession(userPayload);
+      if (sessionResult != null && sessionResult.trim().isNotEmpty) {
+        return _finishOk(sessionResult, systemPrompt, path: 'session');
       }
+      _log('pathA session empty or null');
 
-      if (raw.trim().isEmpty) {
-        // Session may be wedged — recreate once and retry with bare user text.
-        _log('empty after both paths — recreate chat and retry once');
-        await _recreateChat();
-        final chat2 = _chat!;
-        await chat2.addQueryChunk(
-          Message.text(text: userMessage.trim(), isUser: true),
-        );
-        raw = await _collectStreamedResponse(chat2);
-        if (raw.trim().isEmpty) {
-          final response = await chat2.generateChatResponse();
-          raw = _extractText(response);
+      // --- Path B: createChat + stream (secondary) ---
+      final chatResult = await _generateViaChat(userPayload);
+      if (chatResult != null && chatResult.trim().isNotEmpty) {
+        return _finishOk(chatResult, systemPrompt, path: 'chat-stream');
+      }
+      _log('pathB chat-stream empty or null');
+
+      // --- Path C: bare user text via session once more ---
+      final bare = userMessage.trim();
+      if (bare != userPayload) {
+        final bareResult = await _generateViaSession(bare);
+        if (bareResult != null && bareResult.trim().isNotEmpty) {
+          return _finishOk(bareResult, systemPrompt, path: 'session-bare');
         }
-        _log('retry chars=${raw.length}');
+        _log('pathC session-bare empty or null');
       }
 
-      if (raw.trim().isEmpty) {
-        _lastGenerateWasGemma = false;
-        // Do not pretend the model answered; keep diagnostics visible.
-        return 'On-device model returned an empty reply. '
-            'The model file may still be loading, or this device/runtime '
-            'failed generation. Check logcat for [ProjectEVO/Gemma].';
-      }
-
-      final result = ResponseSanitizer.process(
-        raw,
-        systemPrompt: systemPrompt,
-      );
-      if (!result.ok) {
-        _log('sanitizer rejected output (${raw.length} chars)');
-        _lastGenerateWasGemma = false;
-        return result.text; // clear error from sanitizer, not a fake answer
-      }
-
-      _lastGenerateWasGemma = true;
-      _log('generate ok chars=${result.text.length}');
-      return result.text;
-    } catch (e, st) {
-      _log('generate failed: $e\n$st');
       _lastGenerateWasGemma = false;
-      // Recreate chat after hard failures so the next turn is clean.
-      try {
-        await _recreateChat();
-      } catch (_) {}
+      final diagTail = _diagnostics.lines.length > 8
+          ? _diagnostics.lines.sublist(_diagnostics.lines.length - 8).join('\n')
+          : _diagnostics.asText;
+      return 'On-device model returned an empty reply on this device.\n\n'
+          'Open Settings → Inference diagnostics and share that text.\n\n'
+          'Recent diagnostics:\n$diagTail';
+    } catch (e, st) {
+      _log('generate EXCEPTION: ${e.runtimeType}: $e');
+      debugPrint('$st');
+      _lastGenerateWasGemma = false;
       final stub = await _fallback.generate(
         systemPrompt: systemPrompt,
         userMessage: userMessage,
@@ -382,29 +330,124 @@ class GemmaInferenceEngine implements InferenceEngine {
     }
   }
 
-  /// Accumulate TextResponse tokens from the async stream.
-  Future<String> _collectStreamedResponse(InferenceChat chat) async {
-    final buffer = StringBuffer();
+  Future<String?> _generateViaSession(String userPayload) async {
+    InferenceModelSession? session;
     try {
+      _log('session: createSession…');
+      session = await _model!.createSession(
+        temperature: 0.8,
+        topK: 40,
+        topP: 0.95,
+      );
+      _log('session: created ${session.runtimeType}');
+
+      await session.addQueryChunk(
+        Message.text(text: userPayload, isUser: true),
+      );
+      _log('session: addQueryChunk ok isUser=true');
+
+      final reply = await session.getResponse();
+      final text = _coerceToString(reply);
+      _log('session: getResponse type=${reply.runtimeType} chars=${text.length}');
+      return text;
+    } catch (e, st) {
+      _log('session FAIL: ${e.runtimeType}: $e');
+      debugPrint('$st');
+      return null;
+    } finally {
+      try {
+        await session?.close();
+      } catch (e) {
+        _log('session.close: $e');
+      }
+    }
+  }
+
+  Future<String?> _generateViaChat(String userPayload) async {
+    InferenceChat? chat;
+    try {
+      _log('chat: createChat modelType=gemmaIt…');
+      chat = await _model!.createChat(
+        modelType: ModelType.gemmaIt,
+        temperature: 0.8,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 256,
+      );
+      _log('chat: created ${chat.runtimeType}');
+
+      await chat.addQueryChunk(
+        Message.text(text: userPayload, isUser: true),
+      );
+      _log('chat: addQueryChunk ok');
+
+      final buffer = StringBuffer();
+      var events = 0;
+      var textEvents = 0;
       await for (final chunk in chat.generateChatResponseAsync()) {
+        events++;
         final piece = _extractText(chunk);
         if (piece.isNotEmpty) {
+          textEvents++;
           buffer.write(piece);
+        } else {
+          _log('chat: empty chunk type=${chunk.runtimeType}');
         }
       }
+      _log(
+        'chat: stream done events=$events textEvents=$textEvents '
+        'chars=${buffer.length}',
+      );
+
+      if (buffer.isNotEmpty) return buffer.toString();
+
+      // Only if stream produced nothing — try sync once on a NEW chat.
+      // (Do not call sync on the same turn after the stream already finished.)
+      await chat.close();
+      chat = null;
+      chat = await _model!.createChat(
+        modelType: ModelType.gemmaIt,
+        temperature: 0.8,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 256,
+      );
+      await chat.addQueryChunk(
+        Message.text(text: userPayload, isUser: true),
+      );
+      final response = await chat.generateChatResponse();
+      final text = _extractText(response);
+      _log('chat: sync type=${response.runtimeType} chars=${text.length}');
+      return text;
     } catch (e, st) {
-      _log('generateChatResponseAsync error: $e\n$st');
-      // Return whatever we have so far; caller may try sync path.
+      _log('chat FAIL: ${e.runtimeType}: $e');
+      debugPrint('$st');
+      return null;
+    } finally {
+      try {
+        await chat?.close();
+      } catch (e) {
+        _log('chat.close: $e');
+      }
     }
-    return buffer.toString();
+  }
+
+  String _finishOk(String raw, String systemPrompt, {required String path}) {
+    final result = ResponseSanitizer.process(raw, systemPrompt: systemPrompt);
+    if (!result.ok) {
+      _log('sanitizer REJECT path=$path inChars=${raw.length}');
+      _lastGenerateWasGemma = false;
+      return result.text;
+    }
+    _lastGenerateWasGemma = true;
+    _log('generate OK path=$path outChars=${result.text.length}');
+    return result.text;
   }
 
   String _buildUserPayload(String systemPrompt, String userMessage) {
     final user = userMessage.trim();
     final memory = _extractMemoryLines(systemPrompt);
-    if (memory == null || memory.isEmpty) {
-      return user;
-    }
+    if (memory == null || memory.isEmpty) return user;
     return 'Useful facts from my notes:\n$memory\n\n$user';
   }
 
@@ -425,33 +468,26 @@ class GemmaInferenceEngine implements InferenceEngine {
     return lines.join('\n');
   }
 
-  /// Extract text from ModelResponse / TextResponse / String / dynamic.
+  String _coerceToString(dynamic reply) {
+    if (reply == null) return '';
+    if (reply is String) return reply;
+    return _extractText(reply);
+  }
+
   String _extractText(dynamic response) {
     if (response == null) return '';
     if (response is String) return response;
-
-    // Preferred typed path.
-    if (response is TextResponse) {
-      return response.token;
-    }
-
-    // Dynamic fallbacks across package versions.
+    if (response is TextResponse) return response.token;
     try {
       final dynamic t = response.token;
-      if (t is String && t.isNotEmpty) return t;
-      if (t != null && t.toString().isNotEmpty) return t.toString();
+      if (t is String) return t;
+      if (t != null) return t.toString();
     } catch (_) {}
     try {
       final dynamic t = response.text;
-      if (t is String && t.isNotEmpty) return t;
-      if (t != null && t.toString().isNotEmpty) return t.toString();
+      if (t is String) return t;
+      if (t != null) return t.toString();
     } catch (_) {}
-    try {
-      final dynamic t = response.message;
-      if (t is String && t.isNotEmpty) return t;
-      if (t != null && t.toString().isNotEmpty) return t.toString();
-    } catch (_) {}
-
     final s = response.toString();
     if (s.startsWith('Instance of')) return '';
     return s;
@@ -459,7 +495,6 @@ class GemmaInferenceEngine implements InferenceEngine {
 
   @override
   Future<void> dispose() async {
-    await _closeChat();
     try {
       await _model?.close();
     } catch (_) {}

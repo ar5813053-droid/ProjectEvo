@@ -1,4 +1,5 @@
 import '../models/model_info.dart';
+import '../../data/inference/inference_diagnostics.dart';
 
 /// Replaceable AI inference backend. Implementations must never claim sentience.
 abstract class InferenceEngine {
@@ -12,6 +13,9 @@ abstract class InferenceEngine {
   ModelRuntimeState get modelState;
 
   Stream<ModelRuntimeState> get modelStateStream;
+
+  /// Safe on-device diagnostics (no secrets / memory / full prompts).
+  InferenceDiagnostics get diagnostics;
 
   Future<void> initialize();
   Future<void> dispose();
