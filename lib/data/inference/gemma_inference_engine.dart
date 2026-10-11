@@ -64,7 +64,7 @@ class GemmaInferenceEngine implements InferenceEngine {
     await _fallback.initialize();
     try {
       await FlutterEdgeAi.initialize(
-        inferenceEngines: [MediaPipeEngine()],
+        inferenceEngines: const [MediaPipeEngine()],
       );
       _pluginReady = true;
     } catch (e, st) {
@@ -135,9 +135,7 @@ class GemmaInferenceEngine implements InferenceEngine {
       );
 
       installer = installer.withProgress((progress) {
-        final p = progress is num
-            ? progress.toDouble()
-            : double.tryParse(progress.toString()) ?? 0;
+        final double p = progress.toDouble();
         // API may report 0–100 or 0–1
         final normalized =
             p > 1.0 ? (p / 100.0).clamp(0.0, 1.0) : p.clamp(0.0, 1.0);

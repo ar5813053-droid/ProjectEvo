@@ -141,7 +141,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const SizedBox(height: 8),
           DropdownButtonFormField<SimulatedMood>(
-            value: personality.mood,
+            initialValue: personality.mood,
             decoration: const InputDecoration(
               labelText: 'Mood (simulated)',
               border: OutlineInputBorder(),
