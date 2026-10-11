@@ -67,7 +67,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final inference = ref.watch(inferenceEngineProvider);
     final runtimeAsync = ref.watch(modelRuntimeProvider);
     final runtime = runtimeAsync.valueOrNull ?? inference.modelState;
-    final spec = ModelCatalog.defaultModel;
+    final spec = inference.selectedModelSpec;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
@@ -79,6 +79,37 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           Text(
             '${spec.displayName} · ~${spec.sizeLabel}\n${spec.description}',
             style: const TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: spec.id,
+            decoration: const InputDecoration(
+              labelText: 'Model',
+              border: OutlineInputBorder(),
+              helperText:
+                  'POCO diagnostics: 270M returned 0 tokens. Prefer Gemma 3 1B.',
+            ),
+            items: ModelCatalog.all
+                .map(
+                  (m) => DropdownMenuItem(
+                    value: m.id,
+                    child: Text('${m.displayName} (~${m.sizeLabel})'),
+                  ),
+                )
+                .toList(),
+            onChanged: _busy
+                ? null
+                : (id) async {
+                    if (id == null) return;
+                    setState(() => _busy = true);
+                    try {
+                      await ref
+                          .read(inferenceEngineProvider)
+                          .selectModel(ModelCatalog.byId(id));
+                    } finally {
+                      if (mounted) setState(() => _busy = false);
+                    }
+                  },
           ),
           const SizedBox(height: 8),
           ListTile(

@@ -27,17 +27,36 @@ class OnDeviceModelSpec {
   }
 }
 
-/// Recommended models for mid-range phones (e.g. 6 GB RAM POCO X3 Pro).
+/// Models for mid-range phones (e.g. 6 GB RAM POCO X3 Pro).
+///
+/// Device evidence (POCO X3 Pro): Gemma 3 270M q8 .task loads and accepts
+/// queries but native MediaPipe getResponse returns String with 0 characters
+/// on both GPU and CPU. Google's MediaPipe LLM Inference guide primarily
+/// documents Gemma-3 1B .task for Android generation.
 class ModelCatalog {
-  /// Gemma 3 270M IT — smallest official Gemma instruct variant for on-device.
-  /// Format: MediaPipe .task (q8). ~300 MB download.
-  /// Host: litert-community (may require accepting Gemma terms on Hugging Face).
+  /// Gemma 3 1B IT int4 .task — MediaPipe LLM Inference primary recommendation.
+  static const gemma3_1b = OnDeviceModelSpec(
+    id: 'gemma3-1b-it-int4',
+    displayName: 'Gemma 3 1B Instruct (int4)',
+    description:
+        'Recommended for MediaPipe on Android. ~500–700 MB. Stronger than 270M. '
+        'Needs free storage and a HF token if gated. Prefer Wi‑Fi.',
+    networkUrl:
+        'https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.task',
+    fileName: 'gemma3-1b-it-int4.task',
+    approximateBytes: 550 * 1024 * 1024,
+    licenseNote: 'Gemma Terms of Use — accept on Hugging Face if gated.',
+    mayRequireHuggingFaceAccess: true,
+  );
+
+  /// Gemma 3 270M — loads on this device but produced empty native replies
+  /// in ProjectEVO diagnostics; kept as optional fallback download.
   static const gemma3_270m = OnDeviceModelSpec(
     id: 'gemma3-270m-it-q8',
-    displayName: 'Gemma 3 270M Instruct',
+    displayName: 'Gemma 3 270M Instruct (q8)',
     description:
-        'Small instruction-tuned Gemma 3 (~270M params). Best first choice for 6 GB phones. '
-        'Not as capable as 1B/E2B models, but far more likely to load without OOM.',
+        'Smaller (~300 MB). Loaded on POCO X3 Pro but MediaPipe returned empty '
+        'generation (0 tokens). Prefer Gemma 3 1B unless testing.',
     networkUrl:
         'https://huggingface.co/litert-community/gemma-3-270m-it/resolve/main/gemma3-270m-it-q8.task',
     fileName: 'gemma3-270m-it-q8.task',
@@ -46,9 +65,16 @@ class ModelCatalog {
     mayRequireHuggingFaceAccess: true,
   );
 
-  static const List<OnDeviceModelSpec> all = [gemma3_270m];
+  static const List<OnDeviceModelSpec> all = [gemma3_1b, gemma3_270m];
 
-  static OnDeviceModelSpec get defaultModel => gemma3_270m;
+  static OnDeviceModelSpec get defaultModel => gemma3_1b;
+
+  static OnDeviceModelSpec byId(String id) {
+    for (final m in all) {
+      if (m.id == id) return m;
+    }
+    return defaultModel;
+  }
 }
 
 enum ModelPhase {

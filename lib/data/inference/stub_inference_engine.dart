@@ -45,6 +45,12 @@ class StubInferenceEngine implements InferenceEngine {
   Future<void> ensureModelLoaded() async {}
 
   @override
+  Future<void> selectModel(OnDeviceModelSpec spec) async {}
+
+  @override
+  OnDeviceModelSpec get selectedModelSpec => ModelCatalog.defaultModel;
+
+  @override
   Future<void> initialize() async {
     _ready = true;
     _diagnostics.add('stub initialize');

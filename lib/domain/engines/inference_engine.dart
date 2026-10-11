@@ -26,6 +26,11 @@ abstract class InferenceEngine {
   /// Load model into memory for generation (idempotent).
   Future<void> ensureModelLoaded();
 
+  /// Optional: switch preferred catalog model (requires re-download).
+  Future<void> selectModel(OnDeviceModelSpec spec) async {}
+
+  OnDeviceModelSpec get selectedModelSpec;
+
   /// Generate a completion. [systemPrompt] may include memory + personality.
   Future<String> generate({
     required String systemPrompt,

@@ -48,9 +48,9 @@ void main() {
   });
 
   group('ModelCatalog', () {
-    test('default model is Gemma 3 270M', () {
+    test('default model is Gemma 3 1B', () {
       final m = ModelCatalog.defaultModel;
-      expect(m.id, contains('270m'));
+      expect(m.id, contains('1b'));
       expect(m.networkUrl, contains('huggingface.co'));
       expect(m.networkUrl, contains('.task'));
       expect(m.approximateBytes, greaterThan(100 * 1024 * 1024));

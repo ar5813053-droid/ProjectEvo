@@ -40,7 +40,10 @@ class GemmaInferenceEngine implements InferenceEngine {
   bool _lastGenerateWasGemma = false;
   bool _loading = false;
   bool _generating = false;
-  final OnDeviceModelSpec _spec = ModelCatalog.defaultModel;
+  OnDeviceModelSpec _spec = ModelCatalog.defaultModel;
+
+  @override
+  OnDeviceModelSpec get selectedModelSpec => _spec;
 
   @override
   InferenceDiagnostics get diagnostics => _diagnostics;
@@ -48,8 +51,8 @@ class GemmaInferenceEngine implements InferenceEngine {
   @override
   String get name =>
       (_model != null && !_state.usingFallback)
-          ? 'Gemma 3 270M (on-device)'
-          : 'Fallback (Gemma not ready)';
+          ? '${_spec.displayName} (on-device)'
+          : 'Fallback (model not ready)';
 
   @override
   bool get isReady => true;
@@ -78,9 +81,37 @@ class GemmaInferenceEngine implements InferenceEngine {
     debugPrint('[ProjectEVO/Gemma] $msg');
   }
 
+  static const _prefsSelectedKey = 'evo_model_selected_id';
+
+  Future<void> _loadSelectedSpec() async {
+    final prefs = await SharedPreferences.getInstance();
+    final id = prefs.getString(_prefsSelectedKey);
+    _spec = id == null ? ModelCatalog.defaultModel : ModelCatalog.byId(id);
+  }
+
+  /// Switch catalog model (user must re-download).
+  Future<void> selectModel(OnDeviceModelSpec spec) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsSelectedKey, spec.id);
+    _spec = spec;
+    try {
+      await _model?.close();
+    } catch (_) {}
+    _model = null;
+    _emit(_state.copyWith(
+      phase: ModelPhase.notInstalled,
+      message:
+          'Selected ${spec.displayName}. Tap Download & install (~${spec.sizeLabel}).',
+      usingFallback: true,
+      error: null,
+    ));
+    _log('selectModel: ${spec.id}');
+  }
+
   @override
   Future<void> initialize() async {
     await _fallback.initialize();
+    await _loadSelectedSpec();
     try {
       await FlutterEdgeAi.initialize(
         inferenceEngines: const [MediaPipeEngine()],
@@ -123,7 +154,7 @@ class GemmaInferenceEngine implements InferenceEngine {
       _emit(_state.copyWith(
         phase: ModelPhase.notInstalled,
         message:
-            'Download Gemma 3 270M (~${_spec.sizeLabel}) in Settings to enable real on-device replies.',
+            'Download ${_spec.displayName} (~${_spec.sizeLabel}) in Settings to enable real on-device replies.',
         usingFallback: true,
       ));
     }
@@ -210,7 +241,7 @@ class GemmaInferenceEngine implements InferenceEngine {
     if (_model != null) {
       _emit(_state.copyWith(
         phase: ModelPhase.ready,
-        message: 'Gemma 3 270M ready (on-device).',
+        message: '${_spec.displayName} ready (on-device).',
         usingFallback: false,
         error: null,
       ));
@@ -246,7 +277,7 @@ class GemmaInferenceEngine implements InferenceEngine {
       );
       _emit(_state.copyWith(
         phase: ModelPhase.ready,
-        message: 'Gemma 3 270M ready (on-device).',
+        message: '${_spec.displayName} ready (on-device).',
         usingFallback: false,
         error: null,
       ));
