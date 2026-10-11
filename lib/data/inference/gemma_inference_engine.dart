@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../domain/engines/inference_engine.dart';
 import '../../domain/models/model_info.dart';
+import 'response_sanitizer.dart';
 import 'stub_inference_engine.dart';
 
 /// On-device Gemma via Flutter Edge AI (MediaPipe .task path).
@@ -15,6 +16,10 @@ import 'stub_inference_engine.dart';
 /// Fallback replies are always prefixed so the UI never claims Gemma produced them.
 class GemmaInferenceEngine implements InferenceEngine {
   static const _prefsInstalledKey = 'evo_model_installed_id';
+
+  /// Context window for getActiveModel (prompt + reply share this budget).
+  /// Not an output-length cap — MediaPipe ignores maxOutputTokens.
+  static const int _contextTokens = 1024;
 
   final StubInferenceEngine _fallback = StubInferenceEngine();
   final _stateController = StreamController<ModelRuntimeState>.broadcast();
@@ -29,6 +34,7 @@ class GemmaInferenceEngine implements InferenceEngine {
   bool _pluginReady = false;
   bool _lastGenerateWasGemma = false;
   bool _loading = false;
+  bool _generating = false;
   final OnDeviceModelSpec _spec = ModelCatalog.defaultModel;
 
   @override
@@ -201,8 +207,8 @@ class GemmaInferenceEngine implements InferenceEngine {
     ));
 
     try {
-      // Modest maxTokens for 6 GB devices (POCO X3 Pro).
-      _model = await FlutterEdgeAi.getActiveModel(maxTokens: 1024);
+      // maxTokens = full context window (prompt + output share it).
+      _model = await FlutterEdgeAi.getActiveModel(maxTokens: _contextTokens);
       _emit(_state.copyWith(
         phase: ModelPhase.ready,
         message: 'Gemma 3 270M ready (on-device).',
@@ -230,28 +236,47 @@ class GemmaInferenceEngine implements InferenceEngine {
     required String userMessage,
     int maxTokens = 512,
   }) async {
-    // Prefer real model when loaded.
+    // One generation at a time — prevent accidental concurrent calls.
+    if (_generating) {
+      return 'Please wait for the current reply to finish.';
+    }
+
     if (_model != null) {
+      _generating = true;
+      InferenceChat? chat;
       try {
-        final chat = await _model!.createChat();
-        // Combine system + user into a single user turn. MediaPipe chat
-        // templates for Gemma IT handle instruction following well this way.
-        final combined = StringBuffer()
-          ..writeln(systemPrompt.trim())
-          ..writeln()
-          ..writeln(userMessage.trim());
+        // Keep system instructions OUT of the user message.
+        // createChat(systemInstruction:) is the supported path; for MediaPipe
+        // .task it is prepended to the first user turn internally.
+        final shortSystem = _compactSystem(systemPrompt);
+        chat = await _model!.createChat(
+          systemInstruction: shortSystem,
+          // Avoid topK:1 (default in some versions) which is fully greedy
+          // and encourages repetitive loops on small models.
+          temperature: 0.7,
+          topK: 40,
+          topP: 0.9,
+          // maxOutputTokens is honored on .litertlm; MediaPipe logs and ignores.
+          // Still pass a modest value for engines that support it.
+          maxOutputTokens: maxTokens.clamp(64, 256),
+        );
 
         await chat.addQueryChunk(
-          Message.text(text: combined.toString(), isUser: true),
+          Message.text(text: userMessage.trim(), isUser: true),
         );
 
         final response = await chat.generateChatResponse();
-        final out = _extractText(response);
-        if (out.trim().isEmpty) {
+        final raw = _extractText(response);
+        if (raw.trim().isEmpty) {
           throw StateError('Empty model response');
         }
+
+        final cleaned = ResponseSanitizer.sanitize(
+          raw,
+          systemPrompt: shortSystem,
+        );
         _lastGenerateWasGemma = true;
-        return out.trim();
+        return cleaned;
       } catch (e, st) {
         debugPrint('Gemma generate failed, falling back: $e\n$st');
         _lastGenerateWasGemma = false;
@@ -261,6 +286,12 @@ class GemmaInferenceEngine implements InferenceEngine {
           maxTokens: maxTokens,
         );
         return '⚠️ Fallback (on-device model error: $e)\n\n$stub';
+      } finally {
+        _generating = false;
+        // Fresh chat per turn — avoid history accumulation / re-injection.
+        try {
+          await chat?.close();
+        } catch (_) {}
       }
     }
 
@@ -273,11 +304,19 @@ class GemmaInferenceEngine implements InferenceEngine {
     return '⚠️ Fallback (Gemma model not loaded)\n\n$stub';
   }
 
+  /// Shorter system text reduces echo risk on 270M models.
+  String _compactSystem(String systemPrompt) {
+    final trimmed = systemPrompt.trim();
+    if (trimmed.length <= 600) return trimmed;
+    // Prefer the leading identity + rules; drop long memory dumps if huge.
+    return '${trimmed.substring(0, 600).trim()}…';
+  }
+
   String _extractText(dynamic response) {
     if (response == null) return '';
     if (response is String) return response;
     try {
-      // Common patterns across plugin versions: .token, .text, .message
+      // TextResponse exposes .token; other wrappers may use .text / .message
       final dynamic t = response.token ?? response.text ?? response.message;
       if (t != null) return t.toString();
     } catch (_) {}
