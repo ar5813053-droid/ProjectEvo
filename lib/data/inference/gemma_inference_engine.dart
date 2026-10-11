@@ -228,10 +228,21 @@ class GemmaInferenceEngine implements InferenceEngine {
     ));
 
     try {
-      _model = await FlutterEdgeAi.getActiveModel(maxTokens: _contextTokens);
+      // Gemma 3 270M GPU on Android is WIP (HF litert-community note).
+      // Other models have returned empty/pad-only output on GPU while CPU works.
+      // Force CPU so generation is not a silent empty string on mid-range phones.
+      _model = await FlutterEdgeAi.getActiveModel(
+        maxTokens: _contextTokens,
+        preferredBackend: PreferredBackend.cpu,
+      );
+      String backendInfo = 'cpu';
+      try {
+        final dynamic ab = (_model as dynamic).activeBackend;
+        backendInfo = ab?.toString() ?? 'cpu';
+      } catch (_) {}
       _log(
         'load: getActiveModel ok type=${_model.runtimeType} '
-        'contextTokens=$_contextTokens',
+        'contextTokens=$_contextTokens backend=$backendInfo',
       );
       _emit(_state.copyWith(
         phase: ModelPhase.ready,
@@ -308,11 +319,29 @@ class GemmaInferenceEngine implements InferenceEngine {
         _log('pathC session-bare empty or null');
       }
 
+      // Last resort: drop handle and reload explicitly on CPU, one more session.
+      _log('reload: forcing PreferredBackend.cpu after empty generation');
+      try {
+        await _model?.close();
+      } catch (_) {}
+      _model = null;
+      _model = await FlutterEdgeAi.getActiveModel(
+        maxTokens: _contextTokens,
+        preferredBackend: PreferredBackend.cpu,
+      );
+      final retry = await _generateViaSession(userMessage.trim());
+      if (retry != null && retry.trim().isNotEmpty) {
+        return _finishOk(retry, systemPrompt, path: 'session-cpu-reload');
+      }
+      _log('reload session still empty chars=${retry?.length ?? 0}');
+
       _lastGenerateWasGemma = false;
-      final diagTail = _diagnostics.lines.length > 8
-          ? _diagnostics.lines.sublist(_diagnostics.lines.length - 8).join('\n')
+      final diagTail = _diagnostics.lines.length > 12
+          ? _diagnostics.lines.sublist(_diagnostics.lines.length - 12).join('\n')
           : _diagnostics.asText;
       return 'On-device model returned an empty reply on this device.\n\n'
+          'Native getResponse returned String with 0 characters (not an app extraction bug). '
+          'Gemma 3 270M GPU on Android is WIP — this build forces CPU.\n\n'
           'Open Settings → Inference diagnostics and share that text.\n\n'
           'Recent diagnostics:\n$diagTail';
     } catch (e, st) {
@@ -334,10 +363,11 @@ class GemmaInferenceEngine implements InferenceEngine {
     InferenceModelSession? session;
     try {
       _log('session: createSession…');
+      // Prefer conservative sampling; omit topP (optional) — some MediaPipe
+      // builds are sensitive. topK default in plugin is 1 (greedy).
       session = await _model!.createSession(
         temperature: 0.8,
         topK: 40,
-        topP: 0.95,
       );
       _log('session: created ${session.runtimeType}');
 
@@ -371,7 +401,6 @@ class GemmaInferenceEngine implements InferenceEngine {
         modelType: ModelType.gemmaIt,
         temperature: 0.8,
         topK: 40,
-        topP: 0.95,
         maxOutputTokens: 256,
       );
       _log('chat: created ${chat.runtimeType}');
@@ -402,14 +431,12 @@ class GemmaInferenceEngine implements InferenceEngine {
       if (buffer.isNotEmpty) return buffer.toString();
 
       // Only if stream produced nothing — try sync once on a NEW chat.
-      // (Do not call sync on the same turn after the stream already finished.)
       await chat.close();
       chat = null;
       chat = await _model!.createChat(
         modelType: ModelType.gemmaIt,
         temperature: 0.8,
         topK: 40,
-        topP: 0.95,
         maxOutputTokens: 256,
       );
       await chat.addQueryChunk(
