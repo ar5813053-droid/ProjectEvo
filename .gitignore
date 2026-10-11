@@ -30,12 +30,12 @@ build/
 *pat*
 *token*
 
-# Models (download separately)
+# On-device model weights (download separately — not Dart source)
 **/*.bin
 **/*.tflite
 **/*.task
-**/models/**
-!**/models/.gitkeep
+assets/models/**
+!assets/models/.gitkeep
 
 # OS
 .DS_Store
