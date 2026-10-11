@@ -12,13 +12,18 @@ import 'stub_inference_engine.dart';
 
 /// On-device Gemma via Flutter Edge AI (MediaPipe .task path).
 ///
-/// Falls back to [StubInferenceEngine] when the model is missing or load fails.
-/// Fallback replies are always prefixed so the UI never claims Gemma produced them.
+/// Critical MediaPipe behavior (from flutter_edge_ai docs):
+///   ".litertlm … passed as a real system turn.
+///    MediaPipe .task … systemInstruction is **prepended to the first user
+///    message as a fallback**."
+///
+/// On Gemma 3 270M that prepend causes the model to *continue* the instruction
+/// text instead of answering. Therefore this engine does **not** pass a long
+/// systemInstruction to createChat for the MediaPipe path. Context is folded
+/// lightly into the user turn only when needed (memory), and output is
+/// validated by [ResponseSanitizer].
 class GemmaInferenceEngine implements InferenceEngine {
   static const _prefsInstalledKey = 'evo_model_installed_id';
-
-  /// Context window for getActiveModel (prompt + reply share this budget).
-  /// Not an output-length cap — MediaPipe ignores maxOutputTokens.
   static const int _contextTokens = 1024;
 
   final StubInferenceEngine _fallback = StubInferenceEngine();
@@ -44,7 +49,7 @@ class GemmaInferenceEngine implements InferenceEngine {
           : 'Fallback (Gemma not ready)';
 
   @override
-  bool get isReady => true; // always can answer (fallback or model)
+  bool get isReady => true;
 
   @override
   String? get statusMessage => _state.message ?? _state.error;
@@ -131,7 +136,6 @@ class GemmaInferenceEngine implements InferenceEngine {
     ));
 
     try {
-      // Explicit fileType.task routes to MediaPipeEngine.
       var installer = FlutterEdgeAi.installModel(
         modelType: ModelType.gemmaIt,
         fileType: ModelFileType.task,
@@ -142,7 +146,6 @@ class GemmaInferenceEngine implements InferenceEngine {
 
       installer = installer.withProgress((progress) {
         final double p = progress.toDouble();
-        // API may report 0–100 or 0–1
         final normalized =
             p > 1.0 ? (p / 100.0).clamp(0.0, 1.0) : p.clamp(0.0, 1.0);
         _emit(_state.copyWith(
@@ -207,7 +210,6 @@ class GemmaInferenceEngine implements InferenceEngine {
     ));
 
     try {
-      // maxTokens = full context window (prompt + output share it).
       _model = await FlutterEdgeAi.getActiveModel(maxTokens: _contextTokens);
       _emit(_state.copyWith(
         phase: ModelPhase.ready,
@@ -236,7 +238,6 @@ class GemmaInferenceEngine implements InferenceEngine {
     required String userMessage,
     int maxTokens = 512,
   }) async {
-    // One generation at a time — prevent accidental concurrent calls.
     if (_generating) {
       return 'Please wait for the current reply to finish.';
     }
@@ -245,24 +246,21 @@ class GemmaInferenceEngine implements InferenceEngine {
       _generating = true;
       InferenceChat? chat;
       try {
-        // Keep system instructions OUT of the user message.
-        // createChat(systemInstruction:) is the supported path; for MediaPipe
-        // .task it is prepended to the first user turn internally.
-        final shortSystem = _compactSystem(systemPrompt);
+        // MediaPipe prepends systemInstruction into the user turn. Long text
+        // makes 270M continue the instructions. Use NO systemInstruction.
         chat = await _model!.createChat(
-          systemInstruction: shortSystem,
-          // Avoid topK:1 (default in some versions) which is fully greedy
-          // and encourages repetitive loops on small models.
-          temperature: 0.7,
+          temperature: 0.8,
           topK: 40,
-          topP: 0.9,
-          // maxOutputTokens is honored on .litertlm; MediaPipe logs and ignores.
-          // Still pass a modest value for engines that support it.
+          topP: 0.95,
           maxOutputTokens: maxTokens.clamp(64, 256),
         );
 
+        // Optional short memory/context folded into the user turn only when
+        // present and not the placeholder "None."
+        final userPayload = _buildUserPayload(systemPrompt, userMessage);
+
         await chat.addQueryChunk(
-          Message.text(text: userMessage.trim(), isUser: true),
+          Message.text(text: userPayload, isUser: true),
         );
 
         final response = await chat.generateChatResponse();
@@ -271,12 +269,40 @@ class GemmaInferenceEngine implements InferenceEngine {
           throw StateError('Empty model response');
         }
 
-        final cleaned = ResponseSanitizer.sanitize(
+        final result = ResponseSanitizer.process(
           raw,
-          systemPrompt: shortSystem,
+          systemPrompt: systemPrompt,
         );
+        if (!result.ok) {
+          // Do not present instruction-echo as a successful answer.
+          // One retry with the bare user message (no context prefix).
+          debugPrint('Sanitize rejected first output: ${result.text}');
+          try {
+            await chat.close();
+          } catch (_) {}
+          chat = await _model!.createChat(
+            temperature: 0.9,
+            topK: 50,
+            topP: 0.95,
+            maxOutputTokens: maxTokens.clamp(64, 192),
+          );
+          await chat.addQueryChunk(
+            Message.text(text: userMessage.trim(), isUser: true),
+          );
+          final response2 = await chat.generateChatResponse();
+          final raw2 = _extractText(response2);
+          final result2 = ResponseSanitizer.process(raw2);
+          if (!result2.ok || raw2.trim().isEmpty) {
+            _lastGenerateWasGemma = false;
+            return 'On-device model could not produce a clean reply for that '
+                'message (instruction echo). Try a fuller question.';
+          }
+          _lastGenerateWasGemma = true;
+          return result2.text;
+        }
+
         _lastGenerateWasGemma = true;
-        return cleaned;
+        return result.text;
       } catch (e, st) {
         debugPrint('Gemma generate failed, falling back: $e\n$st');
         _lastGenerateWasGemma = false;
@@ -288,7 +314,6 @@ class GemmaInferenceEngine implements InferenceEngine {
         return '⚠️ Fallback (on-device model error: $e)\n\n$stub';
       } finally {
         _generating = false;
-        // Fresh chat per turn — avoid history accumulation / re-injection.
         try {
           await chat?.close();
         } catch (_) {}
@@ -304,19 +329,41 @@ class GemmaInferenceEngine implements InferenceEngine {
     return '⚠️ Fallback (Gemma model not loaded)\n\n$stub';
   }
 
-  /// Shorter system text reduces echo risk on 270M models.
-  String _compactSystem(String systemPrompt) {
-    final trimmed = systemPrompt.trim();
-    if (trimmed.length <= 600) return trimmed;
-    // Prefer the leading identity + rules; drop long memory dumps if huge.
-    return '${trimmed.substring(0, 600).trim()}…';
+  /// Builds the text sent as the single user Message.
+  ///
+  /// Memory is included only when non-empty. We never re-inject the full
+  /// system prompt (that is what MediaPipe would prepend and the model echoes).
+  String _buildUserPayload(String systemPrompt, String userMessage) {
+    final user = userMessage.trim();
+    final memory = _extractMemoryLines(systemPrompt);
+    if (memory == null || memory.isEmpty) {
+      return user;
+    }
+    // Short, natural framing — not "system instructions".
+    return 'Useful facts from my notes:\n$memory\n\n$user';
+  }
+
+  String? _extractMemoryLines(String systemPrompt) {
+    final marker = 'Relevant memory';
+    final idx = systemPrompt.indexOf(marker);
+    if (idx < 0) return null;
+    final after = systemPrompt.substring(idx);
+    final lines = after
+        .split('\n')
+        .skip(1)
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty && l != 'None.' && l != 'None')
+        .where((l) => l.startsWith('-'))
+        .take(3)
+        .toList();
+    if (lines.isEmpty) return null;
+    return lines.join('\n');
   }
 
   String _extractText(dynamic response) {
     if (response == null) return '';
     if (response is String) return response;
     try {
-      // TextResponse exposes .token; other wrappers may use .text / .message
       final dynamic t = response.token ?? response.text ?? response.message;
       if (t != null) return t.toString();
     } catch (_) {}

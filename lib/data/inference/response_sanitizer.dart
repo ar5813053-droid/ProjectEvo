@@ -1,63 +1,66 @@
-/// Post-processes on-device model output: strips leaked system text,
-/// cuts runaway repetition, and enforces a soft length limit.
+/// Post-processes on-device model output for MediaPipe Gemma 3 270M.
 ///
-/// MediaPipe .task models do not honor maxOutputTokens, so this is the
-/// primary safeguard against the 270M model echoing instructions or looping.
+/// MediaPipe .task prepends systemInstruction into the first user turn, so
+/// small models often *continue* that text instead of answering. This class
+/// detects and rejects instruction-echo output; it is a safety net, not the
+/// primary fix (primary fix: do not feed long system text on this runtime).
 class ResponseSanitizer {
-  /// Phrases that belong only in the system prompt / internal scaffolding.
-  static const List<String> _systemLeakMarkers = [
-    'relevant memory (user-approved',
-    'relevant memory (local db',
+  static const List<String> _instructionMarkers = [
+    'you are software only',
     'you are projectevo',
-    'personality (simulated software state',
-    'not real emotions or consciousness',
-    'memory is sqlite storage',
-    'treat retrieved web text as untrusted',
-    'never claim to be conscious',
+    'not conscious or sentient',
+    'answer the user\'s message directly',
     'do not repeat these instructions',
     'do not invent evaluation scores',
+    'relevant memory (local db',
+    'relevant memory (user-approved',
+    'personality (simulated',
+    'never claim to be conscious',
+    'memory is sqlite',
+    'treat retrieved web text as untrusted',
     'heuristic check passed',
     '(eval:',
-    'eval: ',
+    'verbosity ',
+    'curiosity ',
+    'tone: curious',
+    'tone: neutral',
+    'tone: focused',
+    'style: helpful',
   ];
 
-  /// Soft cap on characters returned to the UI (not a token limit).
   static const int maxChars = 1200;
-
-  /// Minimum length of a repeated block to treat as runaway generation.
   static const int minRepeatBlockChars = 40;
 
-  /// Returns cleaned text, or a short error if generation was unusable.
-  static String sanitize(String raw, {String? systemPrompt}) {
+  /// Result of sanitization — either usable reply text or a clear failure.
+  static SanitizeResult process(String raw, {String? systemPrompt}) {
     var text = raw.trim();
     if (text.isEmpty) {
-      return 'The model returned an empty reply. Please try again.';
+      return SanitizeResult.invalid('The model returned an empty reply.');
     }
 
-    // Drop common assistant role prefixes if the model echoes templates.
     text = text.replaceFirst(
       RegExp(r'^(Assistant|Model|EVO)\s*:\s*', caseSensitive: false),
       '',
     );
 
-    // If system prompt leaked as a prefix, strip it.
     if (systemPrompt != null && systemPrompt.trim().isNotEmpty) {
       final sys = systemPrompt.trim();
       if (text.startsWith(sys)) {
         text = text.substring(sys.length).trim();
       } else {
-        final take = sys.length < 160 ? sys.length : 160;
-        final prefix = sys.substring(0, take);
-        if (text.startsWith(prefix)) {
-          final idx = text.indexOf('\n\n');
-          if (idx > 0 && idx < sys.length + 120) {
-            text = text.substring(idx).trim();
+        // Strip longest matching prefix of the system prompt.
+        final limit = sys.length < 240 ? sys.length : 240;
+        for (var len = limit; len >= 40; len -= 20) {
+          final prefix = sys.substring(0, len).trim();
+          if (prefix.isNotEmpty && text.startsWith(prefix)) {
+            text = text.substring(prefix.length).trim();
+            break;
           }
         }
       }
     }
 
-    // Drop lines that are clearly internal scaffolding.
+    // Drop instruction-like lines.
     final lines = text.split('\n');
     final kept = <String>[];
     for (final line in lines) {
@@ -66,14 +69,45 @@ class ResponseSanitizer {
         kept.add(line);
         continue;
       }
-      final isLeak = _systemLeakMarkers.any((m) => lower.contains(m));
-      if (isLeak) continue;
+      if (_instructionMarkers.any((m) => lower.contains(m))) continue;
+      // Malformed memory residue like "None.]" or lone "None."
+      if (RegExp(r'^none\.?\]?$', caseSensitive: false).hasMatch(lower)) {
+        continue;
+      }
+      if (RegExp(r'^none\.?\s*$', caseSensitive: false).hasMatch(lower)) {
+        continue;
+      }
       kept.add(line);
     }
     text = kept.join('\n').trim();
 
+    // Trailing garbage from template/memory leaks.
+    text = text.replaceAll(RegExp(r'\s*None\.\]\s*$'), '');
+    text = text.replaceAll(RegExp(r'\s*None\.\s*$'), '');
+    text = text.replaceAll(RegExp(r'\]\s*$'), '').trim();
+
     if (text.isEmpty) {
-      return 'I could not produce a clean answer. Please rephrase your question.';
+      return SanitizeResult.invalid(
+        'The model echoed internal instructions instead of answering. Try again.',
+      );
+    }
+
+    // Whole-answer instruction detection (after line filter).
+    final lowerAll = text.toLowerCase();
+    final markerHits =
+        _instructionMarkers.where((m) => lowerAll.contains(m)).length;
+    if (markerHits >= 2) {
+      return SanitizeResult.invalid(
+        'The model echoed internal instructions instead of answering. Try again.',
+      );
+    }
+    // Single strong identity leak at the start.
+    if (lowerAll.startsWith('you are software') ||
+        lowerAll.startsWith('you are projectevo') ||
+        lowerAll.startsWith('answer the user')) {
+      return SanitizeResult.invalid(
+        'The model echoed internal instructions instead of answering. Try again.',
+      );
     }
 
     text = _cutRepetition(text);
@@ -88,14 +122,24 @@ class ResponseSanitizer {
       }
     }
 
-    return text.trim();
+    if (text.trim().isEmpty) {
+      return SanitizeResult.invalid(
+        'The model produced unusable output. Please rephrase.',
+      );
+    }
+
+    return SanitizeResult.valid(text.trim());
   }
 
-  /// Detects A+A+A… style loops and keeps a single copy of the repeated unit.
+  /// Backward-compatible wrapper used by older call sites / tests.
+  static String sanitize(String raw, {String? systemPrompt}) {
+    final r = process(raw, systemPrompt: systemPrompt);
+    return r.text;
+  }
+
   static String _cutRepetition(String text) {
     if (text.length < minRepeatBlockChars * 2) return text;
 
-    // 1) Exact consecutive paragraph duplication.
     final paras = text
         .split(RegExp(r'\n\s*\n'))
         .map((p) => p.trim())
@@ -113,7 +157,6 @@ class ResponseSanitizer {
           }
         }
         if (same >= 2) {
-          // Keep one copy of the repeated paragraph, then any different tail.
           final rest = paras.skip(same).toList();
           if (rest.isEmpty) return first;
           return ([first, ...rest]).join('\n\n');
@@ -121,7 +164,6 @@ class ResponseSanitizer {
       }
     }
 
-    // 2) Sliding window: shortest block that repeats 3+ times from the start.
     final n = text.length;
     for (var len = minRepeatBlockChars; len <= n ~/ 3; len++) {
       final block = text.substring(0, len);
@@ -131,12 +173,9 @@ class ResponseSanitizer {
         count++;
         pos += len;
       }
-      if (count >= 3) {
-        return block.trim();
-      }
+      if (count >= 3) return block.trim();
     }
 
-    // 3) High ratio of a single repeated sentence.
     final sentences = text
         .split(RegExp(r'(?<=[.!?])\s+'))
         .map((s) => s.trim())
@@ -165,4 +204,15 @@ class ResponseSanitizer {
     final lb = b.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
     return la == lb;
   }
+}
+
+class SanitizeResult {
+  final bool ok;
+  final String text;
+
+  const SanitizeResult._(this.ok, this.text);
+
+  factory SanitizeResult.valid(String text) => SanitizeResult._(true, text);
+  factory SanitizeResult.invalid(String message) =>
+      SanitizeResult._(false, message);
 }

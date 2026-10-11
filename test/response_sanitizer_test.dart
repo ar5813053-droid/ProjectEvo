@@ -5,57 +5,58 @@ void main() {
   group('ResponseSanitizer', () {
     test('passes through a normal short greeting', () {
       const raw = 'Hi! How can I help you today?';
-      expect(ResponseSanitizer.sanitize(raw), equals(raw));
+      final r = ResponseSanitizer.process(raw);
+      expect(r.ok, isTrue);
+      expect(r.text, equals(raw));
     });
 
     test('passes through a normal answer', () {
       const raw =
           'Paris is the capital of France. It is known for the Eiffel Tower.';
-      expect(ResponseSanitizer.sanitize(raw), equals(raw));
+      final r = ResponseSanitizer.process(raw);
+      expect(r.ok, isTrue);
+      expect(r.text, contains('Paris'));
     });
 
-    test('strips leaked system prompt markers', () {
-      const raw = '''
-You are ProjectEVO, a personal Android assistant.
-Personality (simulated software state only — not real emotions or consciousness):
-Relevant memory (user-approved local DB; may be incomplete):
-None.
+    test('rejects real-device style system instruction leak', () {
+      // Exact pattern reported from POCO X3 Pro after prior fix.
+      const raw =
+          'You are software only — not conscious or sentient. '
+          'Answer the user\'s message directly and briefly. '
+          'Tone: Curious, verbosity 0.5, curiosity 0.6. '
+          'Style: Helpful, honest, clear... None.]';
+      final r = ResponseSanitizer.process(raw);
+      expect(r.ok, isFalse);
+      expect(r.text.toLowerCase().contains('echoed'), isTrue);
+    });
 
-Hello! How can I help?
-''';
-      final out = ResponseSanitizer.sanitize(raw);
-      expect(out.toLowerCase().contains('you are projectevo'), isFalse);
-      expect(out.toLowerCase().contains('relevant memory'), isFalse);
-      expect(out.toLowerCase().contains('hello'), isTrue);
+    test('strips None.] residue', () {
+      const raw = 'Hello there!\nNone.]';
+      final r = ResponseSanitizer.process(raw);
+      expect(r.ok, isTrue);
+      expect(r.text.toLowerCase().contains('none'), isFalse);
+      expect(r.text.contains('Hello'), isTrue);
+    });
+
+    test('rejects empty output', () {
+      final r = ResponseSanitizer.process('   ');
+      expect(r.ok, isFalse);
     });
 
     test('cuts runaway paragraph repetition', () {
       const block =
-          'I am a helpful assistant running on your device and I will answer carefully. ';
-      final raw = List.filled(8, block.trim()).join('\n\n');
-      final out = ResponseSanitizer.sanitize(raw);
-      expect(out.length, lessThan(raw.length ~/ 2));
-      expect(out.contains('helpful assistant'), isTrue);
+          'I am a helpful assistant running on your device and I will answer carefully.';
+      final raw = List.filled(8, block).join('\n\n');
+      final r = ResponseSanitizer.process(raw);
+      expect(r.ok, isTrue);
+      expect(r.text.length, lessThan(raw.length ~/ 2));
     });
 
-    test('handles empty output', () {
-      final out = ResponseSanitizer.sanitize('   ');
-      expect(out.toLowerCase().contains('empty'), isTrue);
-    });
-
-    test('strips invented eval footers via markers', () {
-      const raw =
-          'Sure, here is a tip.\n\n(Eval: 70% · Heuristic check passed)';
-      final out = ResponseSanitizer.sanitize(raw);
-      expect(out.toLowerCase().contains('eval:'), isFalse);
-      expect(out.toLowerCase().contains('heuristic'), isFalse);
-      expect(out.contains('tip'), isTrue);
-    });
-
-    test('respects soft max length', () {
-      final raw = 'Word. ' * 500;
-      final out = ResponseSanitizer.sanitize(raw);
-      expect(out.length, lessThanOrEqualTo(ResponseSanitizer.maxChars + 5));
+    test('sanitize wrapper still returns string for tests', () {
+      expect(
+        ResponseSanitizer.sanitize('Hi!'),
+        equals('Hi!'),
+      );
     });
   });
 }

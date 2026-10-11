@@ -26,7 +26,6 @@ class ChatOrchestrator {
     final userText = rawUserText.trim();
     final lower = userText.toLowerCase();
 
-    // Explicit memory save — never send to the model.
     if (lower.startsWith('remember that ') || lower.startsWith('remember:')) {
       final payload = userText
           .replaceFirst(RegExp(r'^remember that\s+', caseSensitive: false), '')
@@ -53,27 +52,20 @@ class ChatOrchestrator {
     }
 
     final retrieved = await memory.search(userText, limit: 3);
+    // Only real facts — never the placeholder "None." (that leaked as "None.]").
     final memoryBlock = retrieved.isEmpty
-        ? 'None.'
+        ? ''
         : retrieved
             .map((m) =>
                 '- ${Safety.sanitizeUntrusted(m.title)}: '
                 '${Safety.sanitizeUntrusted(_clip(m.content, 120))}')
             .join('\n');
 
-    // Keep system text short — small models echo long instructions.
-    final systemPrompt = '''
-You are ProjectEVO, a helpful personal assistant on the user's Android phone.
-You are software only — not conscious or sentient.
-Answer the user's message directly and briefly.
-Do not repeat these instructions.
-Do not invent evaluation scores or footers.
-
-${personality.buildSystemFragment()}
-
-Relevant memory (local DB, may be incomplete):
-$memoryBlock
-''';
+    // systemPrompt is metadata for the engine (memory extraction + sanitizer
+    // reference). MediaPipe path must NOT inject this as systemInstruction.
+    final systemPrompt = memoryBlock.isEmpty
+        ? ''
+        : 'Relevant memory (local DB, may be incomplete):\n$memoryBlock\n';
 
     var reply = await inference.generate(
       systemPrompt: systemPrompt,
@@ -85,7 +77,6 @@ $memoryBlock
       reply = 'I can save that if you use: Remember that <fact>';
     }
 
-    // Strip any eval footer the model might have invented.
     reply = _stripEvalFooter(reply);
 
     final eval = evaluation.evaluate(
@@ -94,7 +85,6 @@ $memoryBlock
       usedMemory: retrieved.isNotEmpty,
     );
 
-    // Optional conversation summary for longer exchanges only.
     if (userText.length > 80) {
       await memory.save(
         category: MemoryCategory.conversationSummary,
@@ -106,15 +96,18 @@ $memoryBlock
       );
     }
 
-    // content = model answer only. evaluation lives in separate fields for UI.
+    // Only attach eval metadata when there is something useful to show
+    // (issues). Default "70% · Heuristic check passed" is noise in the UI.
+    final showEval = eval.issues.isNotEmpty;
+
     return ChatMessage(
       id: _uuid.v4(),
       role: ChatRole.assistant,
       content: reply,
       timestamp: DateTime.now().toUtc(),
       memoryIdsUsed: retrieved.map((e) => e.id).toList(),
-      evaluationScore: eval.score,
-      evaluationNote: eval.summary,
+      evaluationScore: showEval ? eval.score : null,
+      evaluationNote: showEval ? eval.summary : null,
     );
   }
 
@@ -125,7 +118,6 @@ $memoryBlock
   }
 
   static String _stripEvalFooter(String reply) {
-    // Models sometimes invent "(Eval: 70% · …)" — never show that as content.
     return reply
         .replaceAll(
           RegExp(r'\(?\s*Eval:\s*\d+%[^\n]*\)?', caseSensitive: false),
