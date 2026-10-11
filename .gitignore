@@ -1,0 +1,42 @@
+# Flutter/Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.metadata
+**/doc/api/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Android
+**/android/**/gradle-wrapper.jar
+**/android/.gradle
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/key.properties
+*.jks
+*.keystore
+
+# Secrets — never commit
+.env
+.env.*
+**/secrets/**
+*.pem
+*pat*
+*token*
+
+# Models (download separately)
+**/*.bin
+**/*.tflite
+**/*.task
+**/models/**
+!**/models/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
