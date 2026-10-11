@@ -7,6 +7,7 @@ import '../data/personality/personality_engine.dart';
 import '../data/research/research_service.dart';
 import '../domain/engines/inference_engine.dart';
 import '../domain/models/chat_message.dart';
+import '../domain/models/model_info.dart';
 import '../domain/models/personality_state.dart';
 import '../services/chat_orchestrator.dart';
 
@@ -15,7 +16,11 @@ final memoryRepositoryProvider = Provider<MemoryRepository>((ref) {
 });
 
 final inferenceEngineProvider = Provider<InferenceEngine>((ref) {
-  return GemmaInferenceEngine();
+  final engine = GemmaInferenceEngine();
+  ref.onDispose(() {
+    engine.dispose();
+  });
+  return engine;
 });
 
 final personalityEngineProvider = Provider<PersonalityEngine>((ref) {
@@ -41,6 +46,11 @@ final chatOrchestratorProvider = Provider<ChatOrchestrator>((ref) {
 
 final inferenceReadyProvider = FutureProvider<void>((ref) async {
   await ref.watch(inferenceEngineProvider).initialize();
+});
+
+final modelRuntimeProvider = StreamProvider<ModelRuntimeState>((ref) {
+  final engine = ref.watch(inferenceEngineProvider);
+  return engine.modelStateStream;
 });
 
 class ChatState {

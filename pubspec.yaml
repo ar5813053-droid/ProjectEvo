@@ -1,10 +1,10 @@
 name: project_evo
 description: ProjectEVO — evolving personal AI assistant for Android. Memory, research, evaluation.
 publish_to: "none"
-version: 0.1.0+1
+version: 0.3.0+3
 
 environment:
-  sdk: ">=3.3.0 <4.0.0"
+  sdk: ">=3.5.0 <4.0.0"
 
 dependencies:
   flutter:
@@ -22,6 +22,10 @@ dependencies:
   uuid: ^4.4.2
   collection: ^1.18.0
   meta: ^1.12.0
+  # On-device LLM — Flutter Edge AI (successor to flutter_gemma)
+  # MediaPipe engine runs Gemma 3 .task models on Android.
+  flutter_edge_ai: ^2.1.0
+  flutter_edge_ai_mediapipe: ^1.1.0
 
 dev_dependencies:
   flutter_test:

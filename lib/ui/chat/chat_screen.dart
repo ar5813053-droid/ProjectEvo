@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
 import '../../domain/models/chat_message.dart';
+import '../../domain/models/model_info.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
@@ -41,7 +42,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Widget build(BuildContext context) {
     final chat = ref.watch(chatProvider);
     final inference = ref.watch(inferenceEngineProvider);
+    final runtime = ref.watch(modelRuntimeProvider).valueOrNull ?? inference.modelState;
     final scheme = Theme.of(context).colorScheme;
+    final gemmaReady = runtime.phase == ModelPhase.ready && !runtime.usingFallback;
 
     return Scaffold(
       appBar: AppBar(
@@ -61,12 +64,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             child: ListTile(
               dense: true,
               leading: Icon(
-                inference.isReady ? Icons.check_circle : Icons.warning_amber,
-                color: inference.isReady ? Colors.green : scheme.error,
+                gemmaReady ? Icons.memory : Icons.warning_amber,
+                color: gemmaReady ? Colors.green : scheme.error,
               ),
               title: Text(inference.name, style: const TextStyle(fontSize: 13)),
               subtitle: Text(
-                inference.statusMessage ?? '',
+                '${runtime.phase.name} · ${runtime.message ?? inference.statusMessage ?? ''}',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 11),

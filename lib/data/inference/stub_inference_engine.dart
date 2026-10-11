@@ -1,8 +1,18 @@
+import 'dart:async';
+
 import '../../domain/engines/inference_engine.dart';
+import '../../domain/models/model_info.dart';
 
 /// Honest offline backend when no on-device Gemma runtime/model is configured.
 class StubInferenceEngine implements InferenceEngine {
   bool _ready = false;
+  final _stateController = StreamController<ModelRuntimeState>.broadcast();
+
+  ModelRuntimeState _state = const ModelRuntimeState(
+    phase: ModelPhase.notInstalled,
+    message: 'Using rule-based fallback. Install a compatible on-device model for full chat.',
+    usingFallback: true,
+  );
 
   @override
   String get name => 'Stub (no local model loaded)';
@@ -11,19 +21,45 @@ class StubInferenceEngine implements InferenceEngine {
   bool get isReady => _ready;
 
   @override
-  String? get statusMessage =>
-      _ready
-          ? 'Using rule-based fallback. Install a compatible on-device model for full chat.'
-          : 'Not initialized';
+  String? get statusMessage => _state.message;
+
+  @override
+  bool get isUsingRealModel => false;
+
+  @override
+  ModelRuntimeState get modelState => _state;
+
+  @override
+  Stream<ModelRuntimeState> get modelStateStream => _stateController.stream;
 
   @override
   Future<void> initialize() async {
     _ready = true;
+    _state = const ModelRuntimeState(
+      phase: ModelPhase.notInstalled,
+      message:
+          'Using rule-based fallback. Install a compatible on-device model for full chat.',
+      usingFallback: true,
+    );
+    if (!_stateController.isClosed) _stateController.add(_state);
   }
 
   @override
   Future<void> dispose() async {
     _ready = false;
+    if (!_stateController.isClosed) await _stateController.close();
+  }
+
+  @override
+  Future<void> downloadAndInstallModel({String? huggingFaceToken}) async {
+    throw UnsupportedError(
+      'Stub engine cannot download models. Use GemmaInferenceEngine.',
+    );
+  }
+
+  @override
+  Future<void> ensureModelLoaded() async {
+    // no-op for stub
   }
 
   @override
@@ -57,12 +93,11 @@ class StubInferenceEngine implements InferenceEngine {
       return 'Use the Research tab for web lookup via an authorized API. '
           'Results are saved only if you approve. Untrusted page text is never treated as system instructions.';
     }
-    // Reflect system context briefly without leaking secrets
     final hasMemory = systemPrompt.contains('Relevant memory');
     return 'Fallback reply (no Gemma weights loaded on device).\n\n'
         'You said: "$userMessage"\n\n'
         '${hasMemory ? "I included retrieved memory in context for this answer.\n\n" : ""}'
-        'Next steps: configure a small quantized model when available (see Settings → Model), '
+        'Next steps: download Gemma 3 270M in Settings → Model, '
         'or continue using Memory + Research modules. '
         'Simulated personality settings only affect tone scaffolding, not real emotions.';
   }
