@@ -81,13 +81,13 @@ class StubInferenceEngine implements InferenceEngine {
           'I am software — not conscious or sentient. '
           'A full on-device language model is not loaded yet; this is the built-in fallback responder.';
     }
+    if (lower.startsWith('remember that ') || lower.startsWith('remember:')) {
+      return 'ACK_SAVE_MEMORY'; // orchestrator intercepts
+    }
     if (lower.contains('memory') || lower.contains('remember')) {
       return 'I can save facts you approve into local SQLite memory (not by training model weights). '
           'Open the Memory tab to review, edit, or delete entries. '
           'Say something like “Remember that my preferred language is English” to store a preference.';
-    }
-    if (lower.startsWith('remember that ') || lower.startsWith('remember:')) {
-      return 'ACK_SAVE_MEMORY'; // orchestrator intercepts
     }
     if (lower.contains('research') || lower.contains('search the web')) {
       return 'Use the Research tab for web lookup via an authorized API. '
